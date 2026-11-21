@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod code;
 pub mod cold_storage;
 pub mod compare;
+pub mod cost_matrix;
 pub mod debt;
 pub mod entry;
 pub mod footprint;
@@ -27,6 +28,9 @@ pub use code::{
 pub use compare::{
     compare_reports, BaselineDiff, BaselineDiffSummary, BaselineEntrySnapshot, BaselineSnapshot,
     ChangeCategory, EntryDiff, MAX_BASELINE_FILE_BYTES,
+};
+pub use cost_matrix::{
+    break_even_transaction_fee, duration_ledgers, extension_budget, BudgetRates, ExtensionBudget,
 };
 pub use debt::{RentDebt, RentDebtCalculator};
 pub use entry::{Durability, EntryType, InstanceStorageBreakdown, SacAssetInfo, StorageEntry};

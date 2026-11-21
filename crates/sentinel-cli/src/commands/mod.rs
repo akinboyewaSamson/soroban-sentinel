@@ -3,8 +3,8 @@
 pub mod budget;
 pub mod bundle;
 pub mod check;
-pub mod export_grafana;
 pub mod cost_matrix;
+pub mod export_grafana;
 pub mod restore;
 pub mod scan;
 #[cfg(feature = "tui")]

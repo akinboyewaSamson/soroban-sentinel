@@ -248,6 +248,8 @@ pub struct ExportGrafanaArgs {
     /// Directory where dashboard and alert rule files are written
     #[arg(long, default_value = ".", value_name = "DIR")]
     pub output_dir: std::path::PathBuf,
+}
+
 /// Command-line arguments for the `sentinel restore` command.
 #[derive(Args, Debug, Clone)]
 pub struct RestoreArgs {

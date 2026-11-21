@@ -170,6 +170,8 @@ pub fn derive_temporary_xdr_key(
         ))
     })?;
     derive_temporary_key_from_scval(contract_id, key_scval)
+}
+
 /// Validates and parses a Stellar strkey address (`G...` account or `C...` contract) into an `ScAddress`.
 ///
 /// Returns typed `SentinelError::InvalidContractAddress` diagnostics on malformed or unsupported address types.

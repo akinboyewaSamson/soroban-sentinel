@@ -7,21 +7,18 @@ use stellar_xdr::curr::{ReadXdr, WriteXdr};
 
 use crate::adapters::{
     derive_contract_code_key, derive_contract_instance_key, derive_persistent_key_from_scval,
-    derive_persistent_symbol_key, derive_persistent_xdr_key, extract_wasm_hash_from_instance_entry,
-    inspect_contract_code_entry, parse_contract_id, parse_key_expr, safe_xdr_limits,
     derive_persistent_symbol_key, derive_persistent_xdr_key, extract_instance_storage_breakdown,
-    extract_sac_asset_info, extract_wasm_hash_from_instance_entry, parse_contract_id,
-    parse_key_expr, safe_xdr_limits,
+    extract_sac_asset_info, extract_wasm_hash_from_instance_entry, inspect_contract_code_entry,
+    parse_contract_id, parse_key_expr, safe_xdr_limits,
 };
 use crate::domain::cold_storage::{
     recommend_archival, ArchivalPolicy, ArchivalRecommendation, ExtensionHistory,
 };
 use crate::domain::{
     calculate_remaining_ledgers, estimate_remaining_days, estimate_remaining_seconds_with_velocity,
-    evaluate_risk, Durability, EntryType, RiskLevel, StorageEntry, ThresholdConfig,
-    WasmCodeInspection, TARGET_LEDGER_CLOSE_SECONDS,
     evaluate_risk, Durability, EntryType, InstanceStorageBreakdown, RentDebt, RentDebtCalculator,
-    RiskLevel, SacAssetInfo, StorageEntry, ThresholdConfig, TARGET_LEDGER_CLOSE_SECONDS,
+    RiskLevel, SacAssetInfo, StorageEntry, ThresholdConfig, WasmCodeInspection,
+    TARGET_LEDGER_CLOSE_SECONDS,
 };
 use crate::error::SentinelResult;
 use crate::ports::reader::LedgerReader;
@@ -168,14 +165,14 @@ impl StorageEntryReport {
             remaining_days,
             status,
             wasm_inspection: None,
+            instance_storage_keys: Vec::new(),
         }
     }
 
     /// Attaches parsed WASM metadata to this report entry.
     pub fn with_wasm_inspection(mut self, inspection: WasmCodeInspection) -> Self {
         self.wasm_inspection = Some(inspection);
-            instance_storage_keys: Vec::new(),
-        }
+        self
     }
 
     /// Sets the instance storage keys breakdown.
