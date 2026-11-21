@@ -212,6 +212,7 @@ impl SorobanRpcClient {
     }
 
     /// Internal generic JSON-RPC 2.0 request dispatcher with retry and exponential backoff middleware.
+    #[tracing::instrument(skip(self, params), fields(rpc.method = method, rpc.url = %self.rpc_url))]
     async fn send_rpc_request<P, R>(&self, method: &'static str, params: P) -> SentinelResult<R>
     where
         P: Serialize + Send,
@@ -529,6 +530,65 @@ where
     }
 }
 
+/// Fuzzing entry point: parses a `getLatestLedger` JSON-RPC response body.
+///
+/// Mirrors the deserialization performed by [`SorobanRpcClient::get_latest_ledger`]
+/// after the response size cap has been enforced by the transport.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_parse_get_latest_ledger_response(body: &[u8]) -> SentinelResult<u32> {
+    if body.len() > MAX_RPC_RESPONSE_BYTES {
+        return Err(SentinelError::RpcResponseError {
+            code: -32600,
+            message: "RPC response exceeded maximum allowed size".to_string(),
+        });
+    }
+    let response: JsonRpcResponse<RpcLatestLedgerResult> =
+        serde_json::from_slice(body).map_err(|e| {
+            SentinelError::SerializationError(format!("Failed to parse JSON-RPC response: {}", e))
+        })?;
+    if let Some(error) = response.error {
+        return Err(SentinelError::RpcResponseError {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    response
+        .result
+        .map(|r| r.sequence)
+        .ok_or_else(|| SentinelError::RpcResponseError {
+            code: -32603,
+            message: "Missing result field in JSON-RPC 2.0 response".to_string(),
+        })
+}
+
+/// Fuzzing entry point: parses a `getLedgerEntries` JSON-RPC response body.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_parse_get_ledger_entries_response(body: &[u8]) -> SentinelResult<usize> {
+    if body.len() > MAX_RPC_RESPONSE_BYTES {
+        return Err(SentinelError::RpcResponseError {
+            code: -32600,
+            message: "RPC response exceeded maximum allowed size".to_string(),
+        });
+    }
+    let response: JsonRpcResponse<GetLedgerEntriesResult> =
+        serde_json::from_slice(body).map_err(|e| {
+            SentinelError::SerializationError(format!("Failed to parse JSON-RPC response: {}", e))
+        })?;
+    if let Some(error) = response.error {
+        return Err(SentinelError::RpcResponseError {
+            code: error.code,
+            message: error.message,
+        });
+    }
+    Ok(response
+        .result
+        .and_then(|r| r.entries)
+        .map(|entries| entries.len())
+        .unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +755,18 @@ mod tests {
             res,
             Err(SentinelError::RpcResponseError { code: -32601, .. })
         ));
+    }
+
+    #[cfg(feature = "fuzzing")]
+    #[test]
+    fn test_fuzz_parse_entry_points_reject_oversized_and_accept_valid() {
+        let latest = br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":22,"sequence":42}}"#;
+        assert_eq!(fuzz_parse_get_latest_ledger_response(latest).unwrap(), 42);
+        let entries = br#"{"jsonrpc":"2.0","id":1,"result":{"entries":[]}}"#;
+        assert_eq!(fuzz_parse_get_ledger_entries_response(entries).unwrap(), 0);
+        let huge = vec![b' '; MAX_RPC_RESPONSE_BYTES + 1];
+        assert!(fuzz_parse_get_latest_ledger_response(&huge).is_err());
+        assert!(fuzz_parse_get_ledger_entries_response(&huge).is_err());
     }
 
     #[test]

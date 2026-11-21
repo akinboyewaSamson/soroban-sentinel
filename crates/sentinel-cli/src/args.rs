@@ -10,6 +10,12 @@ use clap::{Args, Parser, Subcommand};
     long_about = "Soroban Sentinel provides operator-grade storage TTL monitoring, expiry-risk classification, and automated maintenance detection for smart contracts on the Stellar network."
 )]
 pub struct Cli {
+    /// OTLP collector endpoint for traces and metrics (e.g. "http://localhost:4317").
+    ///
+    /// Falls back to the OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
+    #[arg(long = "otlp-endpoint", global = true, value_name = "URL")]
+    pub otlp_endpoint: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -18,6 +24,8 @@ pub struct Cli {
 pub enum Commands {
     /// Scan a contract and inspect storage entry TTL status and expiry risk
     Scan(ScanArgs),
+    /// Compare the cost of extending contract storage TTL across duration tiers
+    CostMatrix(CostMatrixArgs),
 
     /// Bundle contract and persistent-key TTL extensions into simulated transactions
     Bundle(BundleArgs),
@@ -27,6 +35,8 @@ pub enum Commands {
 
     /// Export Grafana dashboard and Prometheus alerting definitions
     ExportGrafana(ExportGrafanaArgs),
+    /// Detect archived persistent keys and assemble CAP-0046 restoration transactions
+    Restore(RestoreArgs),
 
     /// Scan contracts once from a TOML manifest
     Check(CheckArgs),
@@ -47,9 +57,13 @@ pub struct ScanArgs {
     #[arg(long, default_value = "testnet", value_name = "NETWORK")]
     pub network: String,
 
-    /// Output format for scan results: "text" (colorized ASCII table), "json" (machine-readable), or "sarif" (GitHub Code Scanning)
+    /// Output format for scan results: "text" (colorized ASCII table), "json" (machine-readable), "csv" (flat tabular export), "parquet" (binary columnar export, requires the `parquet` Cargo feature), or "sarif" (GitHub Code Scanning)
     #[arg(long, default_value = "text", value_name = "FORMAT")]
     pub format: String,
+
+    /// Write report output to a file instead of stdout (existing files are overwritten)
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<String>,
 
     /// Persistent storage key symbol to inspect (can be specified multiple times)
     #[arg(long = "key", value_name = "SYMBOL")]
@@ -90,6 +104,50 @@ pub struct ScanArgs {
     /// Return exit code 2 if any entry regressed in risk status or was removed compared to baseline
     #[arg(long = "fail-on-regression")]
     pub fail_on_regression: bool,
+
+    /// Launch the interactive TUI dashboard (requires the `tui` Cargo feature and a TTY)
+    #[arg(long)]
+    pub tui: bool,
+}
+
+/// Command-line arguments for the cost-matrix command.
+#[derive(Args, Debug)]
+pub struct CostMatrixArgs {
+    #[arg(value_name = "CONTRACT_ID")]
+    pub contract_id: String,
+
+    /// TTL targets in days, separated by commas
+    #[arg(long, value_delimiter = ',', default_value = "30,90,180,365", value_parser = clap::value_parser!(u32).range(1..))]
+    pub tiers: Vec<u32>,
+
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+
+    #[arg(long, env = "SOROBAN_RPC_URL")]
+    pub rpc_url: Option<String>,
+
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    pub format: String,
+
+    /// Persistent storage key symbol (repeatable)
+    #[arg(long)]
+    pub key: Vec<String>,
+
+    /// Assumed effective rent fee per KiB in stroops
+    #[arg(long, default_value_t = 1000)]
+    pub rent_rate_per_kib: u64,
+
+    /// Assumed persistent rent divisor
+    #[arg(long, default_value_t = 1215, value_parser = clap::value_parser!(u32).range(1..))]
+    pub persistent_rent_denominator: u32,
+
+    /// Assumed non-rent fee per batched transaction in stroops
+    #[arg(long, default_value_t = 100)]
+    pub transaction_fee: u64,
+
+    /// Assumed network base reserve in stroops
+    #[arg(long, default_value_t = 5_000_000)]
+    pub base_reserve: u64,
 }
 
 /// Command-line arguments for the `sentinel bundle` command.
@@ -190,6 +248,44 @@ pub struct ExportGrafanaArgs {
     /// Directory where dashboard and alert rule files are written
     #[arg(long, default_value = ".", value_name = "DIR")]
     pub output_dir: std::path::PathBuf,
+/// Command-line arguments for the `sentinel restore` command.
+#[derive(Args, Debug, Clone)]
+pub struct RestoreArgs {
+    /// Target Soroban smart contract address (C... Strkey format)
+    #[arg(value_name = "CONTRACT_ID")]
+    pub contract_id: String,
+
+    /// Persistent storage key symbol to restore (can be specified multiple times)
+    #[arg(long = "key", value_name = "SYMBOL")]
+    pub key: Vec<String>,
+
+    /// Persistent storage key encoded as base64 ScVal XDR (can be specified multiple times)
+    #[arg(long = "key-xdr", value_name = "BASE64_XDR")]
+    pub key_xdr: Vec<String>,
+
+    /// Persistent storage key encoded as typed expression (can be specified multiple times)
+    #[arg(long = "key-expr", value_name = "EXPR")]
+    pub key_expr: Vec<String>,
+
+    /// Source Stellar account used for the simulated transaction (defaults to a placeholder)
+    #[arg(short = 's', long, value_name = "G...")]
+    pub source_account: Option<String>,
+
+    /// Base transaction fee in stroops (resource fee is added after simulation)
+    #[arg(long, default_value_t = 100, value_name = "STROOPS")]
+    pub base_fee: u32,
+
+    /// Target Stellar network
+    #[arg(long, default_value = "testnet", value_name = "NETWORK")]
+    pub network: String,
+
+    /// Output format: "text" (human readable) or "json" (machine readable)
+    #[arg(long, default_value = "text", value_parser = ["text", "json"], value_name = "FORMAT")]
+    pub format: String,
+
+    /// Custom Soroban RPC endpoint URL
+    #[arg(long, value_name = "URL", env = "SOROBAN_RPC_URL")]
+    pub rpc_url: Option<String>,
 }
 
 /// Command-line arguments for a one-shot manifest check.
@@ -218,6 +314,7 @@ mod tests {
             "scan",
             "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
         ]);
+        assert!(args.otlp_endpoint.is_none());
         match args.command {
             Commands::Scan(scan) => {
                 assert_eq!(
@@ -226,6 +323,7 @@ mod tests {
                 );
                 assert_eq!(scan.network, "testnet");
                 assert_eq!(scan.format, "text");
+                assert!(scan.output.is_none());
                 assert_eq!(scan.threshold, 120960);
                 assert!(scan.rpc_url.is_none());
                 assert!(scan.key.is_empty());
@@ -236,6 +334,7 @@ mod tests {
                 assert!(scan.ledger_seconds.is_none());
                 assert!(scan.baseline.is_none());
                 assert!(!scan.fail_on_regression);
+                assert!(!scan.tui);
             }
             _ => panic!("expected scan command"),
         }
@@ -253,6 +352,8 @@ mod tests {
             "mainnet",
             "--format",
             "json",
+            "--output",
+            "report.csv",
             "--threshold",
             "50000",
             "--key",
@@ -274,8 +375,12 @@ mod tests {
             "--baseline",
             "baseline.json",
             "--fail-on-regression",
+            "--tui",
+            "--otlp-endpoint",
+            "http://localhost:4317",
         ]);
 
+        assert_eq!(args.otlp_endpoint.as_deref(), Some("http://localhost:4317"));
         match args.command {
             Commands::Scan(scan) => {
                 assert_eq!(
@@ -288,6 +393,7 @@ mod tests {
                 );
                 assert_eq!(scan.network, "mainnet");
                 assert_eq!(scan.format, "json");
+                assert_eq!(scan.output.as_deref(), Some("report.csv"));
                 assert_eq!(scan.threshold, 50000);
                 assert_eq!(scan.key, vec!["COUNTER", "ADMIN"]);
                 assert_eq!(scan.key_xdr, vec!["AAAAFA=="]);
@@ -297,6 +403,7 @@ mod tests {
                 assert_eq!(scan.ledger_seconds, Some(5.5));
                 assert_eq!(scan.baseline.as_deref(), Some("baseline.json"));
                 assert!(scan.fail_on_regression);
+                assert!(scan.tui);
             }
             _ => panic!("expected scan command"),
         }
@@ -331,6 +438,57 @@ mod tests {
                 }
                 _ => panic!("expected export-grafana command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_restore_defaults_and_flags() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let defaults = Cli::parse_from(["sentinel", "restore", contract]);
+        match defaults.command {
+            Commands::Restore(restore) => {
+                assert_eq!(restore.contract_id, contract);
+                assert!(restore.key.is_empty());
+                assert!(restore.key_xdr.is_empty());
+                assert!(restore.key_expr.is_empty());
+                assert!(restore.source_account.is_none());
+                assert_eq!(restore.base_fee, 100);
+                assert_eq!(restore.network, "testnet");
+                assert_eq!(restore.format, "text");
+                assert!(restore.rpc_url.is_none());
+            }
+            _ => panic!("expected restore command"),
+        }
+
+        let custom = Cli::parse_from([
+            "sentinel",
+            "restore",
+            contract,
+            "--key",
+            "ADMIN",
+            "--key-xdr",
+            "AAAAFA==",
+            "--key-expr",
+            "sym:Balance",
+            "--source-account",
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            "--base-fee",
+            "200",
+            "--network",
+            "mainnet",
+            "--format",
+            "json",
+        ]);
+        match custom.command {
+            Commands::Restore(restore) => {
+                assert_eq!(restore.key, vec!["ADMIN"]);
+                assert_eq!(restore.key_xdr, vec!["AAAAFA=="]);
+                assert_eq!(restore.key_expr, vec!["sym:Balance"]);
+                assert_eq!(restore.base_fee, 200);
+                assert_eq!(restore.network, "mainnet");
+                assert_eq!(restore.format, "json");
+            }
+            _ => panic!("expected restore command"),
         }
     }
 }

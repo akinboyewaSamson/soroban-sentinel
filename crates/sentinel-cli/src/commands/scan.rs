@@ -1,6 +1,10 @@
 //! Execution logic for the `sentinel scan` CLI command.
 
 use std::fs;
+#[cfg(any(feature = "tui", feature = "parquet"))]
+use std::io::IsTerminal;
+#[cfg(feature = "parquet")]
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,10 +12,12 @@ use sentinel_core::adapters::{validate_rpc_url, SorobanRpcClient};
 use sentinel_core::domain::compare::{compare_reports, BaselineSnapshot, MAX_BASELINE_FILE_BYTES};
 use sentinel_core::domain::{RiskLevel, ThresholdConfig, DEFAULT_CRITICAL_LEDGERS};
 use sentinel_core::error::SentinelError;
-use sentinel_core::usecases::{ScanContractUseCase, ScanRequest};
+use sentinel_core::usecases::{ScanContractUseCase, ScanRequest, TTLReport};
 
 use crate::args::ScanArgs;
-use crate::formatters::{render_json_with_diff, render_sarif, render_text_with_diff};
+#[cfg(feature = "parquet")]
+use crate::formatters::render_parquet;
+use crate::formatters::{render_csv, render_json_with_diff, render_sarif, render_text_with_diff};
 
 /// Exit code: All evaluated storage entries have status OK.
 pub const EXIT_OK: i32 = 0;
@@ -121,7 +127,134 @@ pub fn load_and_validate_baseline(
 }
 
 /// Executes the contract scan command and returns the appropriate UNIX exit code.
+/// Verifies that `--output` points to a writable file location without
+/// truncating an existing file. The actual write still happens after a
+/// successful scan and overwrites/truncates the destination.
+fn validate_output_path(path: &str) -> Result<(), String> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() {
+        return Err("--output path must not be empty".to_string());
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(format!(
+                "--output parent directory '{}' does not exist",
+                parent.display()
+            ));
+        }
+    }
+
+    if path.is_dir() {
+        return Err(format!("--output path '{}' is a directory", path.display()));
+    }
+
+    if path.exists() {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("--output path '{}' is not writable: {}", path.display(), e))?;
+    } else {
+        let file = fs::File::create(path)
+            .map_err(|e| format!("--output path '{}' is not writable: {}", path.display(), e))?;
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+
+    Ok(())
+}
+
+/// Refuses to write binary Parquet bytes to an interactive terminal.
+#[cfg(feature = "parquet")]
+fn validate_parquet_stdout(has_output: bool, stdout_is_terminal: bool) -> Result<(), &'static str> {
+    if !has_output && stdout_is_terminal {
+        Err("--format parquet writes binary data; use --output <FILE> or redirect stdout to a file")
+    } else {
+        Ok(())
+    }
+}
+
+/// Renders and writes Parquet bytes to `--output` or to piped stdout.
+fn emit_parquet(report: &TTLReport, path: Option<&str>) -> Result<(), String> {
+    #[cfg(feature = "parquet")]
+    {
+        let bytes = render_parquet(report).map_err(|err| err.to_string())?;
+        match path {
+            Some(path) => fs::write(path, &bytes)
+                .map_err(|err| format!("failed to write --output '{}': {}", path, err)),
+            None => std::io::stdout()
+                .lock()
+                .write_all(&bytes)
+                .map_err(|err| format!("failed to write Parquet output to stdout: {}", err)),
+        }
+    }
+    #[cfg(not(feature = "parquet"))]
+    {
+        // Unreachable: run_scan rejects --format parquet before any RPC work
+        // when the feature is disabled.
+        let _ = (report, path);
+        Ok(())
+    }
+}
+
 pub async fn run_scan(args: ScanArgs) -> i32 {
+    #[cfg(not(feature = "tui"))]
+    if args.tui {
+        eprintln!(
+            "Error: --tui requires the CLI to be built with the `tui` feature (rebuild with `cargo install --path crates/sentinel-cli --features tui` or `cargo build -p sentinel-cli --features tui`)"
+        );
+        return EXIT_INVALID_ARGS;
+    }
+
+    #[cfg(feature = "tui")]
+    {
+        if args.tui && !std::io::stdout().is_terminal() {
+            eprintln!("Error: --tui requires an interactive TTY, but stdout is not a terminal");
+            return EXIT_INVALID_ARGS;
+        }
+        if args.tui && args.baseline.is_some() {
+            eprintln!("Error: --tui cannot be combined with --baseline");
+            return EXIT_INVALID_ARGS;
+        }
+    }
+
+    let format = args.format.to_lowercase();
+
+    #[cfg(not(feature = "parquet"))]
+    if format == "parquet" {
+        eprintln!(
+            "Error: this binary was built without Parquet support; rebuild with --features parquet"
+        );
+        return EXIT_INVALID_ARGS;
+    }
+
+    #[cfg(feature = "parquet")]
+    if format == "parquet" {
+        if let Err(err) =
+            validate_parquet_stdout(args.output.is_some(), std::io::stdout().is_terminal())
+        {
+            eprintln!("Error: {}", err);
+            return EXIT_INVALID_ARGS;
+        }
+    }
+
+    if format == "csv" && args.baseline.is_some() {
+        eprintln!("Error: --baseline is not supported with --format csv");
+        return EXIT_INVALID_ARGS;
+    }
+
+    if format == "parquet" && args.baseline.is_some() {
+        eprintln!("Error: --baseline is not supported with --format parquet");
+        return EXIT_INVALID_ARGS;
+    }
+
+    if let Some(ref path) = args.output {
+        if let Err(err) = validate_output_path(path) {
+            eprintln!("Error: {}", err);
+            return EXIT_INVALID_ARGS;
+        }
+    }
+
     // 1. Validate argument bounds before making any RPC calls
     if let Some(timeout) = args.rpc_timeout {
         if !(1..=120).contains(&timeout) {
@@ -220,18 +353,54 @@ pub async fn run_scan(args: ScanArgs) -> i32 {
         }
     };
 
+    #[cfg(feature = "tui")]
+    if args.tui {
+        return crate::commands::tui::run_tui(report, threshold_config, &args.network);
+    }
+    crate::telemetry::record_scan_metrics(&report);
+
     let baseline_diff = baseline_snapshot
         .as_ref()
         .map(|b| compare_reports(&report, b));
 
-    let output_result = match args.format.to_lowercase().as_str() {
+    let diff_has_regression = baseline_diff
+        .as_ref()
+        .map(|d| d.summary.has_regression)
+        .unwrap_or(false);
+    let final_exit_code = if args.fail_on_regression && diff_has_regression {
+        EXIT_CRITICAL_OR_ARCHIVED
+    } else {
+        match report.overall_status {
+            RiskLevel::Ok => EXIT_OK,
+            RiskLevel::Warn => EXIT_WARN,
+            RiskLevel::Critical | RiskLevel::Archived => EXIT_CRITICAL_OR_ARCHIVED,
+        }
+    };
+
+    if format == "parquet" {
+        return match emit_parquet(&report, args.output.as_deref()) {
+            Ok(()) => final_exit_code,
+            Err(err) => {
+                eprintln!("Error: {}", err);
+                EXIT_INVALID_ARGS
+            }
+        };
+    }
+
+    let output_result = match format.as_str() {
         "text" => Ok(render_text_with_diff(&report, baseline_diff.as_ref())),
         "json" => render_json_with_diff(&report, baseline_diff.clone()),
+        "csv" => render_csv(&report),
         "sarif" => render_sarif(&report),
         other => {
+            let supported = if cfg!(feature = "parquet") {
+                "text, json, csv, parquet, sarif"
+            } else {
+                "text, json, csv, sarif"
+            };
             eprintln!(
-                "Error: Unsupported format '{}'. Supported formats: text, json, sarif",
-                other
+                "Error: Unsupported format '{}'. Supported formats: {}",
+                other, supported
             );
             return EXIT_INVALID_ARGS;
         }
@@ -239,22 +408,20 @@ pub async fn run_scan(args: ScanArgs) -> i32 {
 
     match output_result {
         Ok(output) => {
-            println!("{}", output);
-
-            let diff_has_regression = baseline_diff
-                .as_ref()
-                .map(|d| d.summary.has_regression)
-                .unwrap_or(false);
-
-            if args.fail_on_regression && diff_has_regression {
-                EXIT_CRITICAL_OR_ARCHIVED
-            } else {
-                match report.overall_status {
-                    RiskLevel::Ok => EXIT_OK,
-                    RiskLevel::Warn => EXIT_WARN,
-                    RiskLevel::Critical | RiskLevel::Archived => EXIT_CRITICAL_OR_ARCHIVED,
+            if let Some(path) = args.output.as_deref() {
+                let contents = format!("{}\n", output.trim_end_matches('\n'));
+                if let Err(err) = fs::write(path, contents) {
+                    eprintln!("Error: failed to write --output '{}': {}", path, err);
+                    return EXIT_INVALID_ARGS;
                 }
+            } else if format == "csv" {
+                // The CSV writer already terminates every record; avoid a blank line.
+                println!("{}", output.trim_end_matches('\n'));
+            } else {
+                println!("{}", output);
             }
+
+            final_exit_code
         }
         Err(err) => {
             eprintln!("Error: {}", err);
@@ -266,6 +433,18 @@ pub async fn run_scan(args: ScanArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "parquet")]
+    #[test]
+    fn test_validate_parquet_stdout() {
+        assert!(validate_parquet_stdout(true, true).is_ok());
+        assert!(validate_parquet_stdout(false, false).is_ok());
+        assert!(validate_parquet_stdout(true, false).is_ok());
+        assert_eq!(
+            validate_parquet_stdout(false, true),
+            Err("--format parquet writes binary data; use --output <FILE> or redirect stdout to a file")
+        );
+    }
 
     #[test]
     fn test_resolve_rpc_url_presets() {

@@ -8,3 +8,6 @@ pub use scan::{
     TTLReport,
 };
 pub use scenario::ProtocolScenarioUseCase;
+
+#[cfg(feature = "fuzzing")]
+pub use scan::fuzz_compute_byte_size;

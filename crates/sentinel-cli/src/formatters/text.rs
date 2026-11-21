@@ -339,6 +339,7 @@ mod tests {
             entries,
             overall_status: RiskLevel::Warn,
             archival_recommendations: Vec::new(),
+            sac_asset_info: None,
         };
 
         let output = render_text(&report);
@@ -404,6 +405,7 @@ mod tests {
             entries,
             overall_status: RiskLevel::Archived,
             archival_recommendations: Vec::new(),
+            sac_asset_info: None,
         };
 
         let output = render_text(&report);
