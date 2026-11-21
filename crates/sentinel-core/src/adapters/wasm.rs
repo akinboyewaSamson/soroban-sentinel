@@ -26,7 +26,7 @@ pub fn inspect_wasm(
         .map_err(|error| invalid_wasm(error.to_string()))?;
 
     let mut section_sizes = Vec::new();
-    let mut contract_spec_size_bytes = None;
+    let mut contract_spec_size_bytes: Option<usize> = None;
     let mut interface_version = None;
     let mut sdk_version = None;
     let mut build_id = None;
