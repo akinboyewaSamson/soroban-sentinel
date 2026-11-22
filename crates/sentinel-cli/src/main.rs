@@ -62,9 +62,12 @@ async fn main() {
         Commands::Scan(args) => commands::run_scan(*args).await,
         Commands::Bundle(args) => commands::run_bundle(args).await,
         Commands::AuditKeys(args) => commands::run_audit_keys(args).await,
+        Commands::Budget(args) => commands::run_budget(args).await,
         Commands::ExportGrafana(args) => {
             sentinel_cli::commands::export_grafana::run_export_grafana(args)
         }
+        Commands::Bump(args) => commands::run_bump(args).await,
+        Commands::Network(args) => commands::run_network(args).await,
         Commands::Restore(args) => commands::run_restore(args).await,
         Commands::InstallService(args) => commands::run_install_service(args),
         Commands::Init(args) => commands::run_init(args),

@@ -3,9 +3,10 @@
 use std::str::FromStr;
 use stellar_strkey::{Contract, Strkey};
 use stellar_xdr::curr::{
-    AccountId, ContractDataDurability, ContractExecutable, Hash, LedgerEntry, LedgerEntryData,
-    LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, Limits, PublicKey, ReadXdr, ScAddress,
-    ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, Uint256, WriteXdr,
+    AccountId, ConfigSettingId, ContractDataDurability, ContractExecutable, Hash, LedgerEntry,
+    LedgerEntryData, LedgerKey, LedgerKeyConfigSetting, LedgerKeyContractCode,
+    LedgerKeyContractData, Limits, PublicKey, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol,
+    ScVal, ScVec, Uint256, WriteXdr,
 };
 
 use super::key_expr::parse_key_expr;
@@ -174,6 +175,26 @@ pub fn derive_temporary_xdr_key(
         ))
     })?;
     derive_temporary_key_from_scval(contract_id, key_scval)
+}
+
+/// Derives the base64 XDR key for the network StateArchival config setting.
+pub fn derive_state_archival_config_key() -> SentinelResult<String> {
+    config_setting_key(ConfigSettingId::StateArchival)
+}
+
+/// Derives the base64 XDR key for the network ContractDataEntrySizeBytes setting.
+pub fn derive_contract_data_entry_size_config_key() -> SentinelResult<String> {
+    config_setting_key(ConfigSettingId::ContractDataEntrySizeBytes)
+}
+
+fn config_setting_key(setting_id: ConfigSettingId) -> SentinelResult<String> {
+    LedgerKey::ConfigSetting(LedgerKeyConfigSetting {
+        config_setting_id: setting_id,
+    })
+    .to_xdr_base64(Limits::none())
+    .map_err(|error| {
+        SentinelError::SerializationError(format!("Failed to encode config setting key: {error}"))
+    })
 }
 
 /// Validates and parses a Stellar strkey address (`G...` account or `C...` contract) into an `ScAddress`.

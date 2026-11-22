@@ -10,15 +10,20 @@ use std::time::Duration;
 
 use sentinel_core::adapters::{validate_rpc_url, SorobanRpcClient};
 use sentinel_core::domain::compare::{compare_reports, BaselineSnapshot, MAX_BASELINE_FILE_BYTES};
-use sentinel_core::domain::{RiskLevel, ThresholdConfig, DEFAULT_CRITICAL_LEDGERS};
+use sentinel_core::domain::{
+    build_recommendation_plan, shell_quote, RecommendationAction, RiskLevel, ThresholdConfig,
+    DEFAULT_CRITICAL_LEDGERS,
+};
 use sentinel_core::error::SentinelError;
-use sentinel_core::usecases::{ScanContractUseCase, ScanRequest, TTLReport};
+use sentinel_core::usecases::{fetch_network_limits, ScanContractUseCase, ScanRequest, TTLReport};
 use sentinel_core::{AlertKind, AlertMinLevel, AlertNotifier, WebhookAlertNotifier};
 
 use crate::args::ScanArgs;
 #[cfg(feature = "parquet")]
 use crate::formatters::render_parquet;
-use crate::formatters::{render_csv, render_json_with_diff, render_sarif, render_text_with_diff};
+use crate::formatters::{
+    render_csv, render_json_with_diff, render_markdown, render_sarif, render_text_with_diff,
+};
 
 /// Exit code: All evaluated storage entries have status OK.
 pub const EXIT_OK: i32 = 0;
@@ -246,6 +251,73 @@ fn emit_parquet(report: &TTLReport, path: Option<&str>) -> Result<(), String> {
     }
 }
 
+fn render_recommendation_text(
+    plan: &sentinel_core::domain::RecommendationPlan,
+    contract_id: &str,
+    rpc_url: &str,
+    network: &str,
+) -> String {
+    let mut lines = vec!["Recommendations:".to_string()];
+    for recommendation in &plan.recommendations {
+        match &recommendation.action {
+            RecommendationAction::Extend {
+                ledgers_to_extend,
+                extend_to,
+            } => {
+                if recommendation.durability == sentinel_core::domain::Durability::Persistent {
+                    let raw_key = recommendation
+                        .key
+                        .strip_prefix("persistent:")
+                        .unwrap_or(&recommendation.key);
+                    lines.push(format!(
+                        "  stellar contract extend --id {} --key {} --durability persistent --ledgers-to-extend {} --rpc-url {} --network {}  # target ledger {}",
+                        shell_quote(contract_id),
+                        shell_quote(raw_key),
+                        ledgers_to_extend,
+                        shell_quote(rpc_url),
+                        shell_quote(network),
+                        extend_to
+                    ));
+                } else if recommendation.durability == sentinel_core::domain::Durability::Instance {
+                    lines.push(format!(
+                        "  stellar contract extend --id {} --durability persistent --ledgers-to-extend {} --rpc-url {} --network {}  # contract instance; target ledger {}",
+                        shell_quote(contract_id),
+                        ledgers_to_extend,
+                        shell_quote(rpc_url),
+                        shell_quote(network),
+                        extend_to
+                    ));
+                }
+            }
+            RecommendationAction::Restore => {
+                lines.push(format!("  RESTORE {}", recommendation.key));
+            }
+            RecommendationAction::Unrecoverable => {
+                lines.push(format!("  UNRECOVERABLE {}", recommendation.key));
+            }
+        }
+    }
+    if !plan.network_limit_checked {
+        lines.push(
+            "  Note: network max-entry-TTL was unavailable; a conservative default was used and was not network-validated."
+                .to_string(),
+        );
+    }
+    lines.join("\n")
+}
+
+fn inject_recommendations(
+    output: &str,
+    plan: &sentinel_core::domain::RecommendationPlan,
+) -> Result<String, SentinelError> {
+    let mut value: serde_json::Value = serde_json::from_str(output)
+        .map_err(|error| SentinelError::SerializationError(error.to_string()))?;
+    value["recommendations"] = serde_json::to_value(&plan.recommendations)
+        .map_err(|error| SentinelError::SerializationError(error.to_string()))?;
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| SentinelError::SerializationError(error.to_string()))
+}
+
 pub async fn run_scan(mut args: ScanArgs) -> i32 {
     if let Err(code) = apply_alias(&mut args) {
         return code;
@@ -285,6 +357,14 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
     }
     if args.snapshot.is_some() && (format == "csv" || format == "parquet") {
         eprintln!("Error: --snapshot is not supported with --format csv or --format parquet");
+        return EXIT_INVALID_ARGS;
+    }
+    if args.recommend && !matches!(format.as_str(), "text" | "json") {
+        eprintln!("Error: --recommend is supported with --format text or json");
+        return EXIT_INVALID_ARGS;
+    }
+    if args.recommend && args.target_days == 0 {
+        eprintln!("Error: --target-days must be greater than 0");
         return EXIT_INVALID_ARGS;
     }
 
@@ -385,7 +465,7 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
         request = request.with_ledger_seconds(Some(ledger_seconds));
     }
 
-    let report = if let Some(snapshot_path) = args.snapshot.as_deref() {
+    let (report, network_reader, rpc_url) = if let Some(snapshot_path) = args.snapshot.as_deref() {
         let replay = match sentinel_core::adapters::ReplayReader::replay(
             snapshot_path,
             network_passphrase(&args.network),
@@ -396,8 +476,16 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
                 return EXIT_INVALID_ARGS;
             }
         };
+        let rpc_url = match resolve_rpc_url(&args.network, None) {
+            Ok(url) => url,
+            Err(err) if args.recommend => {
+                eprintln!("Error: {}", err);
+                return EXIT_INVALID_ARGS;
+            }
+            Err(_) => String::new(),
+        };
         match ScanContractUseCase::new(replay).execute(request).await {
-            Ok(report) => report,
+            Ok(report) => (report, None, rpc_url),
             Err(error) => {
                 eprintln!("Error: {error}");
                 return EXIT_INVALID_ARGS;
@@ -412,14 +500,15 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
             }
         };
         let rpc_timeout = Duration::from_secs(args.rpc_timeout.unwrap_or(10));
-        let mut rpc_client = SorobanRpcClient::new_with_timeout(rpc_url, rpc_timeout);
+        let mut rpc_client = SorobanRpcClient::new_with_timeout(rpc_url.clone(), rpc_timeout);
         if let Some(retries) = args.rpc_max_retries {
             let mut policy = rpc_client.retry_policy().clone();
             policy.max_retries = retries;
             rpc_client = rpc_client.with_retry_policy(policy);
         }
+        let network_reader = rpc_client.clone();
         match ScanContractUseCase::new(rpc_client).execute(request).await {
-            Ok(report) => report,
+            Ok(report) => (report, Some(network_reader), rpc_url),
             Err(err) => {
                 eprintln!("Error: {err}");
                 return match err {
@@ -469,6 +558,25 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
         .as_ref()
         .map(|b| compare_reports(&report, b));
 
+    let recommendation_plan = if args.recommend {
+        let max_ttl = match network_reader.as_ref() {
+            Some(reader) => fetch_network_limits(reader)
+                .await
+                .ok()
+                .map(|limits| limits.max_entry_ttl),
+            None => None,
+        };
+        Some(build_recommendation_plan(
+            &report.entries,
+            report.latest_ledger,
+            args.target_days,
+            report.ledger_velocity_seconds,
+            max_ttl,
+        ))
+    } else {
+        None
+    };
+
     let diff_has_regression = baseline_diff
         .as_ref()
         .map(|d| d.summary.has_regression)
@@ -494,15 +602,34 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
     }
 
     let output_result = match format.as_str() {
-        "text" => Ok(render_text_with_diff(&report, baseline_diff.as_ref())),
-        "json" => render_json_with_diff(&report, baseline_diff.clone()),
+        "text" => {
+            let mut output = render_text_with_diff(&report, baseline_diff.as_ref());
+            if let Some(plan) = recommendation_plan.as_ref() {
+                output.push('\n');
+                output.push_str(&render_recommendation_text(
+                    plan,
+                    &args.contract_id,
+                    &rpc_url,
+                    &args.network,
+                ));
+            }
+            Ok(output)
+        }
+        "json" => match render_json_with_diff(&report, baseline_diff.clone()) {
+            Ok(rendered) => match recommendation_plan.as_ref() {
+                Some(plan) => inject_recommendations(&rendered, plan),
+                None => Ok(rendered),
+            },
+            Err(error) => Err(error),
+        },
         "csv" => render_csv(&report),
         "sarif" => render_sarif(&report),
+        "markdown" => Ok(render_markdown(&report)),
         other => {
             let supported = if cfg!(feature = "parquet") {
-                "text, json, csv, parquet, sarif"
+                "text, json, csv, parquet, sarif, markdown"
             } else {
-                "text, json, csv, sarif"
+                "text, json, csv, sarif, markdown"
             };
             eprintln!(
                 "Error: Unsupported format '{}'. Supported formats: {}",

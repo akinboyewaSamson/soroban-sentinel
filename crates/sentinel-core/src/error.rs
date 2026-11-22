@@ -50,6 +50,14 @@ pub enum SentinelError {
 
     #[error("WASM analysis error: {0}")]
     WasmAnalysisError(String),
+    #[error("Missing network config setting: {0}")]
+    MissingNetworkConfig(String),
+
+    #[error("Malformed network config setting: {0}")]
+    MalformedNetworkConfig(String),
+
+    #[error("Unexpected network config setting variant: {0}")]
+    UnexpectedNetworkConfigVariant(String),
 }
 
 /// Convenience type alias for `Result<T, SentinelError>`.
