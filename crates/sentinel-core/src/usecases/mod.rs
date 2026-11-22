@@ -13,3 +13,5 @@ pub use scenario::ProtocolScenarioUseCase;
 
 #[cfg(feature = "fuzzing")]
 pub use scan::fuzz_compute_byte_size;
+pub mod discover;
+pub use discover::discover_storage_keys;

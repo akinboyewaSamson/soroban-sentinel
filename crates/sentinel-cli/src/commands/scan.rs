@@ -128,6 +128,54 @@ pub fn load_and_validate_baseline(
 }
 
 /// Executes the contract scan command and returns the appropriate UNIX exit code.
+pub(super) fn prepare_scan(
+    args: &ScanArgs,
+) -> Result<(ScanContractUseCase<SorobanRpcClient>, ScanRequest), String> {
+    if args
+        .rpc_timeout
+        .is_some_and(|timeout| !(1..=120).contains(&timeout))
+    {
+        return Err(format!(
+            "--rpc-timeout must be between 1 and 120 seconds (got {})",
+            args.rpc_timeout.unwrap_or_default()
+        ));
+    }
+    if args.rpc_max_retries.is_some_and(|retries| retries > 10) {
+        return Err(format!(
+            "--rpc-max-retries must be between 0 and 10 (got {})",
+            args.rpc_max_retries.unwrap_or_default()
+        ));
+    }
+    if args
+        .ledger_seconds
+        .is_some_and(|seconds| !(1.0..=60.0).contains(&seconds))
+    {
+        return Err(format!(
+            "--ledger-seconds must be between 1.0 and 60.0 (got {})",
+            args.ledger_seconds.unwrap_or_default()
+        ));
+    }
+    let url = resolve_rpc_url(&args.network, args.rpc_url.as_deref())?;
+    let thresholds = resolve_threshold_config(args.threshold, args.critical_threshold)?;
+    let mut client = SorobanRpcClient::new_with_timeout(
+        url,
+        Duration::from_secs(args.rpc_timeout.unwrap_or(10)),
+    );
+    if let Some(retries) = args.rpc_max_retries {
+        let mut policy = client.retry_policy().clone();
+        policy.max_retries = retries;
+        client = client.with_retry_policy(policy);
+    }
+    let request = ScanRequest::new(&args.contract_id)
+        .with_network(&args.network)
+        .with_threshold_config(thresholds)
+        .with_persistent_symbols(args.key.clone())
+        .with_persistent_xdr_keys(args.key_xdr.clone())
+        .with_persistent_key_exprs(args.key_expr.clone())
+        .with_ledger_seconds(args.ledger_seconds);
+    Ok((ScanContractUseCase::new(client), request))
+}
+
 /// Verifies that `--output` points to a writable file location without
 /// truncating an existing file. The actual write still happens after a
 /// successful scan and overwrites/truncates the destination.

@@ -36,6 +36,7 @@ arrow-array = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 thiserror.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
 stellar-xdr.workspace = true
 stellar-strkey.workspace = true
 toml = "0.8"

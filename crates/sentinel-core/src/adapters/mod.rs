@@ -42,3 +42,5 @@ pub use xdr_keys::{
 pub use soroban_rpc::{
     fuzz_parse_get_latest_ledger_response, fuzz_parse_get_ledger_entries_response,
 };
+mod submitter;
+pub mod wasm_spec;

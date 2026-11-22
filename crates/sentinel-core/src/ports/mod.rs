@@ -11,3 +11,7 @@ pub use mock::MockLedgerReader;
 pub use notifier::{AlertKind, AlertMinLevel, AlertNotifier};
 pub use reader::{LatestLedgerInfo, LedgerReader, RawLedgerEntry, ReaderHealth};
 pub use simulator::{MockSimulationEngine, RentEstimate, SimulationEngine};
+pub mod submitter;
+pub use submitter::{
+    MockTransactionSubmitter, SubmissionOutcome, SubmissionPolicy, TransactionSubmitter,
+};
