@@ -3,8 +3,8 @@
 pub mod alias;
 pub mod budget;
 pub mod bundle;
-pub mod code;
 pub(crate) mod cache;
+pub mod code;
 pub mod cold_storage;
 pub mod compare;
 pub mod cost_matrix;
@@ -20,6 +20,7 @@ pub mod storage_audit;
 pub mod ttl;
 pub mod wasm_analysis;
 
+pub use alias::{AliasError, AliasRegistry};
 pub use budget::{
     calculate_budget, BudgetEntry, BudgetError, BudgetLineItem, BudgetReport, LEDGERS_PER_DAY,
     STROOPS_PER_XLM,
@@ -27,14 +28,10 @@ pub use budget::{
 pub use bundle::{
     plan_bundle_footprints, BundleError, BundleFootprint, MAX_BUNDLE_FOOTPRINT_ENTRIES,
 };
+pub use cache::{footprint_cache_key, SimulationCache, SimulationCacheEntry, SimulationCacheKey};
 pub use code::{
     SorobanInterfaceVersion, WasmCodeInspection, WasmSectionSize, DEFAULT_MAX_WASM_SIZE_BYTES,
 };
-pub use alias::{AliasError, AliasRegistry};
-pub use bundle::{
-    plan_bundle_footprints, BundleError, BundleFootprint, MAX_BUNDLE_FOOTPRINT_ENTRIES,
-};
-pub use cache::{footprint_cache_key, SimulationCache, SimulationCacheEntry, SimulationCacheKey};
 pub use compare::{
     compare_reports, BaselineDiff, BaselineDiffSummary, BaselineEntrySnapshot, BaselineSnapshot,
     ChangeCategory, EntryDiff, MAX_BASELINE_FILE_BYTES,

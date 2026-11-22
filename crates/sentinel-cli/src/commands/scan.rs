@@ -337,21 +337,6 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
         request = request.with_ledger_seconds(Some(ledger_seconds));
     }
 
-    let report = match usecase.execute(request).await {
-        Ok(r) => r,
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            return match err {
-                SentinelError::InvalidContractAddress(_)
-                | SentinelError::InvalidXdrKey(_)
-                | SentinelError::InvalidThresholdConfig(_)
-                | SentinelError::InvalidRpcUrl(_) => EXIT_INVALID_ARGS,
-                SentinelError::RpcConnectionTimeout(_)
-                | SentinelError::RpcResponseError { .. }
-                | SentinelError::SerializationError(_)
-                | SentinelError::InvalidWasm(_) => EXIT_RPC_FAILURE,
-                _ => EXIT_INVALID_ARGS,
-            };
     let report = if let Some(snapshot_path) = args.snapshot.as_deref() {
         let replay = match sentinel_core::adapters::ReplayReader::replay(
             snapshot_path,

@@ -1,15 +1,12 @@
 //! CLI command execution modules.
 
+pub mod audit_keys;
 pub mod budget;
 pub mod bundle;
 pub mod check;
 pub mod cost_matrix;
-pub mod export_grafana;
-pub mod audit_keys;
-pub mod bundle;
-pub mod check;
-pub mod cost_matrix;
 pub mod diff;
+pub mod export_grafana;
 pub mod forecast;
 pub mod init;
 pub mod keys;
@@ -19,8 +16,8 @@ pub mod service;
 #[cfg(feature = "tui")]
 pub mod tui;
 
-pub use budget::run_budget;
 pub use audit_keys::run_audit_keys;
+pub use budget::run_budget;
 pub use bundle::run_bundle;
 pub use check::run_check;
 pub use cost_matrix::run_cost_matrix;
