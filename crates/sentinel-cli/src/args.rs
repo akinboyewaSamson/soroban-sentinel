@@ -578,3 +578,12 @@ pub struct BumpArgs {
     /// Source Stellar account G... address.
     #[arg(long, value_name = "G...")]
     pub source_account: String,
+
+    /// Maximum simulated transaction fee allowed when submitting.
+    #[arg(long, value_name = "STROOPS")]
+    pub max_fee: Option<u64>,
+
+    /// Submit the signed transaction instead of only printing it.
+    #[arg(long)]
+    pub submit: bool,
+}

@@ -40,7 +40,6 @@ pub use domain::{
     DEFAULT_WARNING_LEDGERS, LEDGERS_PER_DAY, MAX_BASELINE_FILE_BYTES,
     MAX_BUNDLE_FOOTPRINT_ENTRIES, SECONDS_PER_DAY, STROOPS_PER_XLM, TARGET_LEDGER_CLOSE_SECONDS,
 };
-pub use error::*;
 pub use error::{SentinelError, SentinelResult};
 pub use ports::*;
 pub use ports::{
