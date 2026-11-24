@@ -15,7 +15,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use sentinel_core::adapters::soroban_rpc::Jitter;
 use sentinel_core::adapters::{
     derive_contract_instance_key, extract_instance_storage_breakdown, extract_sac_asset_info,
-    extract_wasm_hash_from_instance_entry, RetryPolicy, SorobanRpcClient, MAX_KEYS_PER_REQUEST,
+    extract_wasm_hash_from_instance_entry, RetryPolicy, SorobanRpcClient, MAX_BATCH_REQUESTS,
+    MAX_KEYS_PER_REQUEST,
 };
 use sentinel_core::domain::RiskLevel;
 use sentinel_core::error::SentinelError;
@@ -656,37 +657,46 @@ async fn test_get_ledger_entries_second_chunk_fault_propagates_typed_error() {
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with(move |req: &wiremock::Request| {
-            let chunk_num = call_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
-            let body: Value = serde_json::from_slice(&req.body).expect("Valid request JSON");
-            let keys = body["params"]["keys"]
-                .as_array()
-                .expect("keys array in params");
+            let batch_num = call_count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+            let requests: Vec<Value> =
+                serde_json::from_slice(&req.body).expect("Valid JSON-RPC batch request");
 
-            if chunk_num == 1 {
-                assert_eq!(keys.len(), MAX_KEYS_PER_REQUEST);
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "latestLedger": 5400000,
-                        "entries": [{
-                            "key": keys[0],
-                            "xdr": "VALID_PLACEHOLDER",
-                            "liveUntilLedgerSeq": 5600000
-                        }]
-                    }
-                }))
+            if batch_num == 1 {
+                assert_eq!(requests.len(), MAX_BATCH_REQUESTS);
+                let responses: Vec<Value> = requests
+                    .iter()
+                    .map(|request| {
+                        let keys = request["params"]["keys"]
+                            .as_array()
+                            .expect("keys array in params");
+                        assert_eq!(keys.len(), MAX_KEYS_PER_REQUEST);
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "result": {
+                                "latestLedger": 5400000,
+                                "entries": [{
+                                    "key": keys[0],
+                                    "xdr": "VALID_PLACEHOLDER",
+                                    "liveUntilLedgerSeq": 5600000
+                                }]
+                            }
+                        })
+                    })
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(responses)
             } else {
-                // Second chunk returns truncated JSON
+                // Second batch returns truncated JSON
+                assert_eq!(requests.len(), 1);
                 ResponseTemplate::new(200)
-                    .set_body_string(r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[{"key":"#)
+                    .set_body_string(r#"[{"jsonrpc":"2.0","id":21,"result":{"entries":[{"key":"#)
             }
         })
         .expect(2)
         .mount(&mock_server)
         .await;
 
-    let keys: Vec<String> = (0..MAX_KEYS_PER_REQUEST + 5)
+    let keys: Vec<String> = (0..MAX_KEYS_PER_REQUEST * MAX_BATCH_REQUESTS + 5)
         .map(|i| format!("CHUNK_KEY_{i}"))
         .collect();
     let client = client_with_policy(&mock_server, deterministic_policy(2, 1, 10));
@@ -694,11 +704,11 @@ async fn test_get_ledger_entries_second_chunk_fault_propagates_typed_error() {
     let err = client
         .get_ledger_entries(&keys)
         .await
-        .expect_err("Fault in second chunk must fail entire get_ledger_entries call");
+        .expect_err("Fault in second batch must fail entire get_ledger_entries call");
 
     assert!(
         matches!(err, SentinelError::SerializationError(_)),
-        "Expected SerializationError from second chunk, got: {err:?}"
+        "Expected SerializationError from second batch, got: {err:?}"
     );
     mock_server.verify().await;
 }

@@ -72,7 +72,8 @@ pub use recommend::{
 };
 pub use restore::{plan_restore_footprint, RestoreError, RestorePlan};
 pub use risk::{
-    evaluate_risk, RiskLevel, ThresholdConfig, DEFAULT_CRITICAL_LEDGERS, DEFAULT_WARNING_LEDGERS,
+    evaluate_risk, evaluate_risk_for_durability, RiskLevel, ThresholdConfig, ThresholdOverride,
+    DEFAULT_CRITICAL_LEDGERS, DEFAULT_WARNING_LEDGERS,
 };
 pub use scenario::{
     evaluate_protocol_scenario, NetworkRentParameters, ProtocolScenarioReport, ScenarioEntry,

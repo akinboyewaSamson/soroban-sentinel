@@ -21,6 +21,10 @@ use crate::domain::{
     ContractUpgradeBaseline, ContractUpgradeEvent, Durability, EntryType, InstanceStorageBreakdown,
     RentDebt, RentDebtCalculator, RiskLevel, SacAssetInfo, StorageEntry, ThresholdConfig,
     WasmCodeInspection, TARGET_LEDGER_CLOSE_SECONDS,
+    estimate_remaining_seconds_with_velocity, evaluate_risk_for_durability,
+    format_contract_code_hash, ContractUpgradeBaseline, ContractUpgradeEvent, Durability,
+    EntryType, InstanceStorageBreakdown, RentDebt, RentDebtCalculator, RiskLevel, SacAssetInfo,
+    StorageEntry, ThresholdConfig, TARGET_LEDGER_CLOSE_SECONDS,
 };
 use crate::error::SentinelResult;
 use crate::ports::reader::LedgerReader;
@@ -500,7 +504,11 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
             let remaining_seconds =
                 estimate_remaining_seconds_with_velocity(remaining_ledgers, ledger_velocity);
             let remaining_days = estimate_remaining_days(remaining_seconds);
-            let status = evaluate_risk(remaining_ledgers, &request.threshold_config);
+            let status = evaluate_risk_for_durability(
+                remaining_ledgers,
+                Durability::Instance,
+                &request.threshold_config,
+            );
 
             let mut instance_report = StorageEntryReport::new(
                 "instance",
@@ -611,7 +619,11 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
                 let remaining_seconds =
                     estimate_remaining_seconds_with_velocity(remaining_ledgers, ledger_velocity);
                 let remaining_days = estimate_remaining_days(remaining_seconds);
-                let status = evaluate_risk(remaining_ledgers, &request.threshold_config);
+                let status = evaluate_risk_for_durability(
+                    remaining_ledgers,
+                    Durability::Code,
+                    &request.threshold_config,
+                );
 
                 reports.push(
                     StorageEntryReport::new(
@@ -663,7 +675,11 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
                 let remaining_seconds =
                     estimate_remaining_seconds_with_velocity(remaining_ledgers, ledger_velocity);
                 let remaining_days = estimate_remaining_days(remaining_seconds);
-                let status = evaluate_risk(remaining_ledgers, &request.threshold_config);
+                let status = evaluate_risk_for_durability(
+                    remaining_ledgers,
+                    Durability::Persistent,
+                    &request.threshold_config,
+                );
 
                 if let Some((policy, histories)) = &self.archival {
                     if let Some(history) = histories.get(&key_xdr) {
@@ -1282,5 +1298,77 @@ mod tests {
             .find(|e| e.key_identifier == "code_wasm")
             .unwrap();
         assert!(code_rep.instance_storage_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_applies_per_durability_threshold_overrides() {
+        use crate::domain::ThresholdOverride;
+
+        let contract_bytes = [80u8; 32];
+        let wasm_bytes = [81u8; 32];
+        let contract_strkey = stellar_strkey::Contract(contract_bytes).to_string();
+
+        let instance_key = derive_contract_instance_key(&contract_bytes).unwrap();
+        let code_key = derive_contract_code_key(&wasm_bytes).unwrap();
+        let symbol_key = derive_persistent_symbol_key(&contract_bytes, "COUNTER").unwrap();
+
+        let instance_xdr = make_test_instance_xdr(contract_bytes, wasm_bytes);
+        let code_xdr = make_test_code_xdr(wasm_bytes, &[0xCA, 0xFE, 0xBA, 0xBE]);
+        let symbol_xdr = make_test_persistent_symbol_xdr(contract_bytes, "COUNTER", 7);
+
+        let latest_ledger = 5_400_000;
+        // All three entries have identical remaining TTL: 150,000 ledgers.
+        let live_until = latest_ledger + 150_000;
+        let instance_raw = RawLedgerEntry::new(&instance_key, &instance_xdr, live_until, 5_390_000);
+        let code_raw = RawLedgerEntry::new(&code_key, &code_xdr, live_until, 5_380_000);
+        let symbol_raw = RawLedgerEntry::new(&symbol_key, &symbol_xdr, live_until, 5_370_000);
+
+        let mock_reader = MockLedgerReader::new()
+            .with_latest_ledger(latest_ledger, 22)
+            .with_entry(instance_raw)
+            .with_entry(code_raw)
+            .with_entry(symbol_raw);
+
+        // Global fallback: warn < 100k, crit < 20k (persistent falls back -> Ok)
+        // Instance override: warn < 300k, crit < 100k -> Warn
+        // Code override: warn < 500k, crit < 200k -> Critical
+        let thresholds = ThresholdConfig::new(100_000, 20_000)
+            .with_instance_override(ThresholdOverride::new(300_000, 100_000))
+            .with_code_override(ThresholdOverride::new(500_000, 200_000));
+
+        let usecase = ScanContractUseCase::new(mock_reader);
+        let request = ScanRequest::new(&contract_strkey)
+            .with_persistent_symbols(vec!["COUNTER".to_string()])
+            .with_threshold_config(thresholds);
+
+        let report = usecase.execute(request).await.expect("Scan should succeed");
+
+        assert_eq!(report.entries.len(), 3);
+        assert_eq!(report.entries[0].key_identifier, "instance");
+        assert_eq!(report.entries[0].status, RiskLevel::Warn);
+        assert_eq!(report.entries[1].key_identifier, "code_wasm");
+        assert_eq!(report.entries[1].status, RiskLevel::Critical);
+        assert_eq!(report.entries[2].key_identifier, "persistent:COUNTER");
+        assert_eq!(report.entries[2].status, RiskLevel::Ok);
+        assert_eq!(report.overall_status, RiskLevel::Critical);
+    }
+
+    #[tokio::test]
+    async fn test_scan_rejects_invalid_per_durability_override() {
+        use crate::domain::ThresholdOverride;
+        use crate::error::SentinelError;
+
+        let contract_bytes = [82u8; 32];
+        let contract_strkey = stellar_strkey::Contract(contract_bytes).to_string();
+
+        let mock_reader = MockLedgerReader::new().with_latest_ledger(5_400_000, 22);
+        let usecase = ScanContractUseCase::new(mock_reader);
+
+        let invalid_thresholds =
+            ThresholdConfig::default().with_code_override(ThresholdOverride::new(50, 100));
+        let request = ScanRequest::new(&contract_strkey).with_threshold_config(invalid_thresholds);
+
+        let err = usecase.execute(request).await.unwrap_err();
+        assert!(matches!(err, SentinelError::InvalidThresholdConfig(_)));
     }
 }

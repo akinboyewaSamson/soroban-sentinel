@@ -4,7 +4,7 @@ use crate::{
     alerts::incident::{IncidentDispatcher, Provider},
     args::WatchArgs,
     commands::{scan::prepare_scan, EXIT_INVALID_ARGS},
-    formatters::{render_json, render_text},
+    formatters::{render_json, render_text_with_options},
 };
 
 pub async fn run_watch(args: WatchArgs) -> i32 {
@@ -63,7 +63,7 @@ pub async fn run_watch(args: WatchArgs) -> i32 {
                 let output = if format == "json" {
                     render_json(&report)
                 } else {
-                    Ok(render_text(&report))
+                    Ok(render_text_with_options(&report, args.scan.no_color))
                 };
                 match output {
                     Ok(output) => println!("{output}"),

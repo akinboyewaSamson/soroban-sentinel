@@ -22,7 +22,8 @@ use crate::args::ScanArgs;
 #[cfg(feature = "parquet")]
 use crate::formatters::render_parquet;
 use crate::formatters::{
-    render_csv, render_json_with_diff, render_markdown, render_sarif, render_text_with_diff,
+    render_csv, render_json_with_diff, render_markdown, render_ndjson, render_sarif,
+    render_text_with_diff_and_options,
 };
 
 /// Exit code: All evaluated storage entries have status OK.
@@ -609,7 +610,9 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
 
     let output_result = match format.as_str() {
         "text" => {
-            let mut output = render_text_with_diff(&report, baseline_diff.as_ref());
+            let no_color = args.no_color || args.output.is_some();
+            let mut output =
+                render_text_with_diff_and_options(&report, baseline_diff.as_ref(), no_color);
             if let Some(plan) = recommendation_plan.as_ref() {
                 output.push('\n');
                 output.push_str(&render_recommendation_text(
@@ -628,14 +631,15 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
             },
             Err(error) => Err(error),
         },
+        "ndjson" => render_ndjson(&report),
         "csv" => render_csv(&report),
         "sarif" => render_sarif(&report),
         "markdown" => Ok(render_markdown(&report)),
         other => {
             let supported = if cfg!(feature = "parquet") {
-                "text, json, csv, parquet, sarif, markdown"
+                "text, json, ndjson, csv, parquet, sarif, markdown"
             } else {
-                "text, json, csv, sarif, markdown"
+                "text, json, ndjson, csv, sarif, markdown"
             };
             eprintln!(
                 "Error: Unsupported format '{}'. Supported formats: {}",
@@ -648,7 +652,11 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
     match output_result {
         Ok(output) => {
             if let Some(path) = args.output.as_deref() {
-                let contents = format!("{}\n", output.trim_end_matches('\n'));
+                let contents = if output.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", output.trim_end_matches('\n'))
+                };
                 if let Err(err) = fs::write(path, contents) {
                     eprintln!("Error: failed to write --output '{}': {}", path, err);
                     return EXIT_INVALID_ARGS;
@@ -656,6 +664,10 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
             } else if format == "csv" {
                 // The CSV writer already terminates every record; avoid a blank line.
                 println!("{}", output.trim_end_matches('\n'));
+            } else if format == "ndjson" {
+                if !output.is_empty() {
+                    println!("{}", output.trim_end_matches('\n'));
+                }
             } else {
                 println!("{}", output);
             }
