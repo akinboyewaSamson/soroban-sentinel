@@ -88,6 +88,7 @@ async fn run_budget_inner(args: BudgetArgs) -> Result<(BudgetOutput, String), Bu
     let rpc_url = resolve_rpc_url(&args.network, args.rpc_url.as_deref())
         .map_err(BudgetCommandError::Invalid)?;
     let rpc_client = SorobanRpcClient::new(rpc_url.clone());
+    let temporary_keys = temporary_key_descriptors(&contract_id_bytes, &args)?;
 
     let scan = ScanContractUseCase::new(rpc_client.clone());
     let request = ScanRequest::new(&args.contract_id)
@@ -113,7 +114,6 @@ async fn run_budget_inner(args: BudgetArgs) -> Result<(BudgetOutput, String), Bu
         })
         .collect();
 
-    let temporary_keys = temporary_key_descriptors(&contract_id_bytes, &args)?;
     if !temporary_keys.is_empty() {
         let query_keys: Vec<_> = temporary_keys
             .iter()

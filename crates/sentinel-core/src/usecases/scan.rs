@@ -11,14 +11,16 @@ use crate::adapters::{
     extract_sac_asset_info, extract_wasm_hash_from_instance_entry, inspect_contract_code_entry,
     parse_contract_id, parse_key_expr, safe_xdr_limits,
 };
+use crate::domain::burn_rate::{calculate_burn_rate, BurnRate, DEFAULT_SAMPLE_WINDOW_LEDGERS};
 use crate::domain::cold_storage::{
     recommend_archival, ArchivalPolicy, ArchivalRecommendation, ExtensionHistory,
 };
 use crate::domain::{
-    calculate_remaining_ledgers, estimate_remaining_days, estimate_remaining_seconds_with_velocity,
-    evaluate_risk, Durability, EntryType, InstanceStorageBreakdown, RentDebt, RentDebtCalculator,
-    RiskLevel, SacAssetInfo, StorageEntry, ThresholdConfig, WasmCodeInspection,
-    TARGET_LEDGER_CLOSE_SECONDS,
+    calculate_remaining_ledgers, detect_contract_upgrade, estimate_remaining_days,
+    estimate_remaining_seconds_with_velocity, evaluate_risk, format_contract_code_hash,
+    ContractUpgradeBaseline, ContractUpgradeEvent, Durability, EntryType, InstanceStorageBreakdown,
+    RentDebt, RentDebtCalculator, RiskLevel, SacAssetInfo, StorageEntry, ThresholdConfig,
+    WasmCodeInspection, TARGET_LEDGER_CLOSE_SECONDS,
 };
 use crate::error::SentinelResult;
 use crate::ports::reader::LedgerReader;
@@ -40,6 +42,13 @@ pub struct ScanRequest {
     pub network: Option<String>,
     /// Optional override for ledger close velocity in seconds per ledger.
     pub ledger_seconds_override: Option<f64>,
+    /// Number of recent ledgers sampled when measuring burn velocity.
+    #[serde(default = "default_sample_window")]
+    pub sample_window: u32,
+}
+
+fn default_sample_window() -> u32 {
+    DEFAULT_SAMPLE_WINDOW_LEDGERS
 }
 
 impl ScanRequest {
@@ -53,6 +62,7 @@ impl ScanRequest {
             threshold_config: ThresholdConfig::default(),
             network: None,
             ledger_seconds_override: None,
+            sample_window: DEFAULT_SAMPLE_WINDOW_LEDGERS,
         }
     }
 
@@ -89,6 +99,12 @@ impl ScanRequest {
     /// Set an optional ledger close velocity override.
     pub fn with_ledger_seconds(mut self, ledger_seconds: Option<f64>) -> Self {
         self.ledger_seconds_override = ledger_seconds;
+        self
+    }
+
+    /// Set the number of recent ledgers sampled to measure burn velocity.
+    pub fn with_sample_window(mut self, sample_window: u32) -> Self {
+        self.sample_window = sample_window;
         self
     }
 }
@@ -193,6 +209,9 @@ pub struct TTLReport {
     pub latest_ledger: u32,
     /// Estimated seconds per ledger close (typically 5.0s).
     pub ledger_velocity_seconds: f64,
+    /// Observed storage burn velocity and sampling metadata.
+    #[serde(default)]
+    pub burn_rate: BurnRate,
     /// Individual reports for all monitored storage entries.
     pub entries: Vec<StorageEntryReport>,
     /// Aggregate overall risk status for the contract.
@@ -203,6 +222,15 @@ pub struct TTLReport {
     /// Extracted metadata if the contract is a Stellar Asset Contract (SAC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sac_asset_info: Option<SacAssetInfo>,
+    /// WASM code hash observed in the contract instance, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_code_hash: Option<String>,
+    /// WASM bytecode size from the contract's `ContractCodeEntry`, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_bytecode_size: Option<u32>,
+    /// Upgrade detected against the configured historical executable baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_upgrade: Option<ContractUpgradeEvent>,
 }
 
 impl TTLReport {
@@ -304,6 +332,21 @@ fn compute_byte_size(entry_xdr_base64: &str) -> usize {
     }
 }
 
+fn contract_code_bytecode_size(entry_xdr_base64: &str) -> Option<u32> {
+    let data = if let Ok(entry) =
+        stellar_xdr::curr::LedgerEntry::from_xdr_base64(entry_xdr_base64, safe_xdr_limits())
+    {
+        entry.data
+    } else {
+        stellar_xdr::curr::LedgerEntryData::from_xdr_base64(entry_xdr_base64, safe_xdr_limits())
+            .ok()?
+    };
+    let stellar_xdr::curr::LedgerEntryData::ContractCode(code) = data else {
+        return None;
+    };
+    u32::try_from(code.code.len()).ok()
+}
+
 /// Fuzzing entry point for the scan byte-size computation.
 ///
 /// Keeps the production helper private while allowing the fuzz target in `fuzz/`
@@ -318,6 +361,7 @@ pub fn fuzz_compute_byte_size(entry_xdr_base64: &str) -> usize {
 pub struct ScanContractUseCase<R: LedgerReader> {
     reader: R,
     archival: Option<(ArchivalPolicy, HashMap<String, ExtensionHistory>)>,
+    upgrade_baseline: Option<(ContractUpgradeBaseline, RentDebtCalculator)>,
 }
 
 impl<R: LedgerReader> ScanContractUseCase<R> {
@@ -326,6 +370,7 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
         Self {
             reader,
             archival: None,
+            upgrade_baseline: None,
         }
     }
 
@@ -337,6 +382,16 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
         histories: HashMap<String, ExtensionHistory>,
     ) -> Self {
         self.archival = Some((policy, histories));
+        self
+    }
+
+    /// Compare WASM executable state with a prior scan and calculate the minimum-TTL rent delta.
+    pub fn with_upgrade_baseline(
+        mut self,
+        baseline: ContractUpgradeBaseline,
+        rent_calculator: RentDebtCalculator,
+    ) -> Self {
+        self.upgrade_baseline = Some((baseline, rent_calculator));
         self
     }
 
@@ -379,19 +434,25 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
         // 1. Derive deterministic ContractInstance key
         let instance_key_xdr = derive_contract_instance_key(&contract_id_bytes)?;
 
-        // Resolve ledger close velocity: explicit CLI override, or query getLedgers from RPC, or default 5.0s
-        let ledger_velocity = if let Some(ov) = request.ledger_seconds_override {
-            if (1.0..=60.0).contains(&ov) {
-                ov
-            } else {
-                TARGET_LEDGER_CLOSE_SECONDS
-            }
+        // Resolve storage burn velocity: explicit CLI override, historical
+        // ledger close samples, a legacy single velocity measurement, or the
+        // standard 5.0s target when RPC history is pruned or unavailable.
+        let burn_rate = if let Some(override_seconds) = request.ledger_seconds_override {
+            BurnRate::measured(override_seconds)
         } else {
-            match self.reader.get_ledger_close_velocity(latest_ledger).await {
-                Ok(Some(v)) if (1.0..=60.0).contains(&v) => v,
-                _ => TARGET_LEDGER_CLOSE_SECONDS,
+            match self
+                .reader
+                .get_ledger_close_samples(latest_ledger, request.sample_window)
+                .await
+            {
+                Ok(Some(samples)) => calculate_burn_rate(&samples, TARGET_LEDGER_CLOSE_SECONDS),
+                _ => match self.reader.get_ledger_close_velocity(latest_ledger).await {
+                    Ok(Some(velocity)) => BurnRate::measured(velocity),
+                    _ => BurnRate::fallback(),
+                },
             }
         };
+        let ledger_velocity = burn_rate.seconds_per_ledger;
 
         // 2. Derive persistent keys from symbols, base64 ScVal, and typed key expressions
         let mut persistent_descriptors: Vec<(String, String)> = Vec::new();
@@ -428,6 +489,8 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
         let mut wasm_hash_opt: Option<[u8; 32]> = None;
         let mut instance_remaining_ledgers = 0;
         let mut sac_asset_info_opt: Option<SacAssetInfo> = None;
+        let mut contract_bytecode_size = None;
+        let mut contract_upgrade = None;
 
         if let Some(entry) = instance_entry_opt {
             let byte_size = compute_byte_size(&entry.entry_xdr_base64);
@@ -498,6 +561,44 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
 
             report_keys.push(code_key_xdr);
             if let Some(code_entry) = code_entry_opt {
+                let bytecode_size = contract_code_bytecode_size(&code_entry.entry_xdr_base64);
+                if let Some(size) = bytecode_size {
+                    contract_bytecode_size = Some(size);
+                    if let (Some((baseline, calculator)), Some(current_hash)) =
+                        (&self.upgrade_baseline, wasm_hash_opt)
+                    {
+                        let baseline_rent =
+                            calculator.minimum_ttl_rent_stroops(baseline.bytecode_size);
+                        let current_rent = calculator.minimum_ttl_rent_stroops(size);
+                        let baseline_rent = i128::try_from(baseline_rent).map_err(|_| {
+                            crate::error::SentinelError::SerializationError(
+                                "baseline minimum-TTL rent exceeds supported range".to_string(),
+                            )
+                        })?;
+                        let current_rent = i128::try_from(current_rent).map_err(|_| {
+                            crate::error::SentinelError::SerializationError(
+                                "current minimum-TTL rent exceeds supported range".to_string(),
+                            )
+                        })?;
+                        let rent_delta =
+                            current_rent.checked_sub(baseline_rent).ok_or_else(|| {
+                                crate::error::SentinelError::SerializationError(
+                                    "minimum-TTL rent delta exceeds supported range".to_string(),
+                                )
+                            })?;
+                        contract_upgrade = detect_contract_upgrade(
+                            *baseline,
+                            current_hash,
+                            size,
+                            latest_ledger,
+                            rent_delta,
+                        );
+                    }
+                } else if self.upgrade_baseline.is_some() {
+                    return Err(crate::error::SentinelError::SerializationError(
+                        "contract code entry could not be decoded for upgrade tracking".into(),
+                    ));
+                }
                 let byte_size = compute_byte_size(&code_entry.entry_xdr_base64);
                 let live_until = code_entry.live_until_ledger_seq;
                 let remaining_ledgers = calculate_remaining_ledgers(live_until, latest_ledger);
@@ -527,6 +628,11 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
                     .with_wasm_inspection(wasm_inspection),
                 );
             } else {
+                if self.upgrade_baseline.is_some() {
+                    return Err(crate::error::SentinelError::SerializationError(
+                        "contract code entry is missing during upgrade tracking".into(),
+                    ));
+                }
                 // Missing/archived code entry
                 reports.push(StorageEntryReport::new(
                     "code_wasm",
@@ -619,10 +725,14 @@ impl<R: LedgerReader> ScanContractUseCase<R> {
                 network,
                 latest_ledger,
                 ledger_velocity_seconds: ledger_velocity,
+                burn_rate,
                 entries: reports,
                 overall_status,
                 archival_recommendations,
                 sac_asset_info: sac_asset_info_opt,
+                contract_code_hash: wasm_hash_opt.map(|hash| format_contract_code_hash(&hash)),
+                contract_bytecode_size,
+                contract_upgrade,
             },
             report_keys,
         ))
@@ -638,6 +748,7 @@ mod tests {
         ScContractInstance, ScSymbol, ScVal,
     };
 
+    use crate::domain::burn_rate::{BurnRateSource, LedgerCloseSample};
     use crate::ports::mock::MockLedgerReader;
     use crate::ports::reader::RawLedgerEntry;
 
@@ -1032,6 +1143,42 @@ mod tests {
         assert_eq!(inst.estimated_remaining_seconds, 600_000.0);
         // 600,000 / 86400 ~= 6.9444 days
         assert!((inst.remaining_days - 6.9444).abs() < 1e-3);
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_historical_samples_uses_measured_burn_rate() {
+        let contract_bytes = [60u8; 32];
+        let contract_strkey = stellar_strkey::Contract(contract_bytes).to_string();
+
+        let instance_key = derive_contract_instance_key(&contract_bytes).unwrap();
+        let instance_xdr = make_test_instance_xdr(contract_bytes, [61u8; 32]);
+        let instance_raw = RawLedgerEntry::new(&instance_key, &instance_xdr, 5_500_000, 5_400_000);
+
+        // Ledgers 100, 200 and 300 closed after 1000, 1550 and 2100 seconds:
+        // an exactly 5.5s/ledger linear trend.
+        let samples = vec![
+            LedgerCloseSample::new(100, 1_000),
+            LedgerCloseSample::new(200, 1_550),
+            LedgerCloseSample::new(300, 2_100),
+        ];
+        let mock_reader = MockLedgerReader::new()
+            .with_latest_ledger(5_400_000, 22)
+            .with_close_samples(samples)
+            .with_entry(instance_raw);
+
+        let usecase = ScanContractUseCase::new(mock_reader);
+        let request = ScanRequest::new(&contract_strkey).with_sample_window(250);
+
+        let report = usecase.execute(request).await.unwrap();
+
+        assert_eq!(report.ledger_velocity_seconds, 5.5);
+        assert_eq!(report.burn_rate.source, BurnRateSource::Measured);
+        assert_eq!(report.burn_rate.sample_count, 3);
+        assert_eq!(report.burn_rate.observed_ledgers, 200);
+        assert_eq!(report.burn_rate.latest_close_time, Some(2_100));
+
+        let inst = &report.entries[0];
+        assert_eq!(inst.estimated_remaining_seconds, 550_000.0);
     }
 
     #[tokio::test]

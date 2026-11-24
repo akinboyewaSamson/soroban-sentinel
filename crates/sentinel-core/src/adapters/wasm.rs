@@ -5,7 +5,8 @@ use wasmparser::{Encoding, Parser, Payload, Validator};
 
 use super::xdr_keys::safe_xdr_limits;
 use crate::domain::code::{
-    SorobanInterfaceVersion, WasmCodeInspection, WasmSectionSize, DEFAULT_MAX_WASM_SIZE_BYTES,
+    SorobanInterfaceVersion, WasmCodeInspection, WasmInspectionContext, WasmSectionSize,
+    DEFAULT_MAX_WASM_SIZE_BYTES,
 };
 use crate::error::{SentinelError, SentinelResult};
 
@@ -115,10 +116,12 @@ pub fn inspect_wasm(
         interface_version,
         sdk_version,
         build_id,
-        code_remaining_ledgers,
-        instance_remaining_ledgers,
-        critical_ledgers,
-        DEFAULT_MAX_WASM_SIZE_BYTES,
+        WasmInspectionContext {
+            code_remaining_ledgers,
+            instance_remaining_ledgers,
+            critical_ledgers,
+            max_wasm_size_bytes: DEFAULT_MAX_WASM_SIZE_BYTES,
+        },
     ))
 }
 

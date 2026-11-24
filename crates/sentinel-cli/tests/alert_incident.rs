@@ -17,6 +17,7 @@ fn report(status: RiskLevel) -> TTLReport {
         network: "testnet".into(),
         latest_ledger: 10,
         ledger_velocity_seconds: 5.0,
+        burn_rate: Default::default(),
         entries: vec![StorageEntryReport::new(
             "instance",
             EntryType::ContractInstance,
@@ -31,6 +32,9 @@ fn report(status: RiskLevel) -> TTLReport {
         overall_status: status,
         archival_recommendations: Vec::new(),
         sac_asset_info: None,
+        contract_code_hash: None,
+        contract_bytecode_size: None,
+        contract_upgrade: None,
     }
 }
 

@@ -49,6 +49,15 @@ pub struct WasmCodeInspection {
     pub exceeds_size_limit: bool,
 }
 
+/// Ledger and policy values needed to interpret a WASM code entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmInspectionContext {
+    pub code_remaining_ledgers: i64,
+    pub instance_remaining_ledgers: i64,
+    pub critical_ledgers: u32,
+    pub max_wasm_size_bytes: usize,
+}
+
 impl WasmCodeInspection {
     /// Constructs inspection output using decoded module and ledger data.
     pub fn new(
@@ -58,12 +67,10 @@ impl WasmCodeInspection {
         interface_version: Option<SorobanInterfaceVersion>,
         sdk_version: Option<String>,
         build_id: Option<String>,
-        remaining_ledgers: i64,
-        instance_remaining_ledgers: i64,
-        critical_ledgers: u32,
-        max_wasm_size_bytes: usize,
+        context: WasmInspectionContext,
     ) -> Self {
-        let byte_ledger_exposure = wasm_size_bytes as u128 * remaining_ledgers.max(0) as u128;
+        let byte_ledger_exposure =
+            wasm_size_bytes as u128 * context.code_remaining_ledgers.max(0) as u128;
         Self {
             wasm_size_bytes,
             section_sizes,
@@ -72,12 +79,13 @@ impl WasmCodeInspection {
             sdk_version,
             build_id,
             byte_ledger_exposure,
-            code_remaining_ledgers: remaining_ledgers,
-            instance_remaining_ledgers,
-            ttl_delta_from_instance_ledgers: remaining_ledgers
-                .saturating_sub(instance_remaining_ledgers),
-            nearing_archival: remaining_ledgers <= critical_ledgers as i64,
-            exceeds_size_limit: wasm_size_bytes > max_wasm_size_bytes,
+            code_remaining_ledgers: context.code_remaining_ledgers,
+            instance_remaining_ledgers: context.instance_remaining_ledgers,
+            ttl_delta_from_instance_ledgers: context
+                .code_remaining_ledgers
+                .saturating_sub(context.instance_remaining_ledgers),
+            nearing_archival: context.code_remaining_ledgers <= context.critical_ledgers as i64,
+            exceeds_size_limit: wasm_size_bytes > context.max_wasm_size_bytes,
         }
     }
 }
@@ -95,10 +103,12 @@ mod tests {
             None,
             None,
             None,
-            -1,
-            -1,
-            34_560,
-            DEFAULT_MAX_WASM_SIZE_BYTES,
+            WasmInspectionContext {
+                code_remaining_ledgers: -1,
+                instance_remaining_ledgers: -1,
+                critical_ledgers: 34_560,
+                max_wasm_size_bytes: DEFAULT_MAX_WASM_SIZE_BYTES,
+            },
         );
 
         assert_eq!(inspection.byte_ledger_exposure, 0);

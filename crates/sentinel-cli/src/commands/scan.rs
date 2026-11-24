@@ -11,8 +11,8 @@ use std::time::Duration;
 use sentinel_core::adapters::{validate_rpc_url, SorobanRpcClient};
 use sentinel_core::domain::compare::{compare_reports, BaselineSnapshot, MAX_BASELINE_FILE_BYTES};
 use sentinel_core::domain::{
-    build_recommendation_plan, shell_quote, RecommendationAction, RiskLevel, ThresholdConfig,
-    DEFAULT_CRITICAL_LEDGERS,
+    build_recommendation_plan, shell_quote, validate_sample_window, RecommendationAction,
+    RiskLevel, ThresholdConfig, DEFAULT_CRITICAL_LEDGERS,
 };
 use sentinel_core::error::SentinelError;
 use sentinel_core::usecases::{fetch_network_limits, ScanContractUseCase, ScanRequest, TTLReport};
@@ -434,6 +434,11 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
         }
     }
 
+    if let Err(error) = validate_sample_window(args.sample_window) {
+        eprintln!("Error: --sample-window {}", error);
+        return EXIT_INVALID_ARGS;
+    }
+
     let baseline_snapshot = if let Some(ref path) = args.baseline {
         match load_and_validate_baseline(path, &args.contract_id, &args.network) {
             Ok(s) => Some(s),
@@ -459,7 +464,8 @@ pub async fn run_scan(mut args: ScanArgs) -> i32 {
         .with_threshold_config(threshold_config)
         .with_persistent_symbols(args.key)
         .with_persistent_xdr_keys(args.key_xdr)
-        .with_persistent_key_exprs(args.key_expr);
+        .with_persistent_key_exprs(args.key_expr)
+        .with_sample_window(args.sample_window);
 
     if let Some(ledger_seconds) = args.ledger_seconds {
         request = request.with_ledger_seconds(Some(ledger_seconds));
