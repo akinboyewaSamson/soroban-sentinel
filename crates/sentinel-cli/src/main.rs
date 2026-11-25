@@ -92,6 +92,7 @@ async fn main() {
         Commands::DiffReports(args) => commands::run_diff_reports(args),
         Commands::DiffNetworks(args) => commands::run_diff_networks(args).await,
         Commands::Doctor(args) => commands::doctor::run_doctor(args).await,
+        Commands::TraceRoute(args) => commands::trace_route::run_trace_route(args).await,
         Commands::Watch(args) => commands::watch::run_watch(*args).await,
         Commands::Forecast(args) => commands::run_forecast(args).await,
     };

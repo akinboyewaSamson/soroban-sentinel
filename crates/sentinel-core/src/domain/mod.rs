@@ -1,5 +1,6 @@
 //! Core pure domain models and calculations.
 
+pub mod acceleration;
 pub mod alias;
 pub mod budget;
 pub mod bundle;
@@ -16,17 +17,27 @@ pub mod fee_bump;
 pub mod footprint;
 pub mod histogram;
 pub mod key_pattern;
+pub mod multisig;
 pub mod network_limits;
 pub mod planner;
+pub mod probabilistic_ttl;
 pub mod recommend;
 pub mod restore;
+pub mod restore_fee;
 pub mod risk;
 pub(crate) mod scenario;
 pub mod storage_audit;
 pub mod ttl;
 pub mod upgrade;
 pub mod wasm_analysis;
+pub mod wasm_graph;
+pub mod wasm_imports;
 
+pub use acceleration::{
+    AcceleratedDecayWarning, AccelerationError, AccelerationReport, DecayClassification,
+    EntryAcceleration, StateGrowth, StorageAccelerationTracker,
+    DEFAULT_ACCELERATION_TOLERANCE_RATIO,
+};
 pub use alias::{AliasError, AliasRegistry};
 pub use budget::{
     calculate_budget, BudgetEntry, BudgetError, BudgetLineItem, BudgetReport, LEDGERS_PER_DAY,
@@ -66,11 +77,15 @@ pub use planner::{
     plan_extension, plan_extension_with_cost, DeferralReason, DeferredExtension, ExtensionPlan,
     ExtensionPlanRequest, PlannedExtension,
 };
+pub use probabilistic_ttl::{
+    estimate_probabilistic_lifetime, LifetimePercentiles, VelocityDistribution, VelocityModel,
+};
 pub use recommend::{
     build_recommendation_plan, calculate_extend_to, shell_quote, RecommendationAction,
     RecommendationPlan, TTLRecommendation, CONSERVATIVE_DEFAULT_MAX_ENTRY_TTL,
 };
 pub use restore::{plan_restore_footprint, RestoreError, RestorePlan};
+pub use restore_fee::{RestoreFee, RestoreFeeCalculator, RestoreFeeError};
 pub use risk::{
     evaluate_risk, evaluate_risk_for_durability, RiskLevel, ThresholdConfig, ThresholdOverride,
     DEFAULT_CRITICAL_LEDGERS, DEFAULT_WARNING_LEDGERS,
@@ -93,8 +108,17 @@ pub use upgrade::{
     ContractUpgradeEvent,
 };
 pub use wasm_analysis::{analyze_wasm_sections, WasmAnalysis, WasmSectionSizes};
+pub use wasm_graph::{WasmDependencyGraph, WasmGraphError, WasmGraphNode, WasmRentLiability};
+pub use wasm_imports::{
+    scan_wasm_imports, HostSubsystem, WasmEnvironmentProfile, WasmFunctionSignature, WasmImport,
+    WasmImportKind, WasmValueType,
+};
 
 pub use durability_migration::{
     DurabilityMigrationAnalysis, MigrationRequest, RentAnalysisError, RentRates,
 };
 pub use histogram::{ExpirationBucket, ExpirationHistogram, HistogramBucket};
+pub use multisig::{
+    required_cosigners, verify_bumper_authority, AccountSignerConfig, AccountThresholds,
+    MultisigError, MultisigVerificationResult, SignerEntry,
+};
